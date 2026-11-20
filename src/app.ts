@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { Server } from 'socket.io';
 import { socketAuth, type TokenVerifier } from './middlewares/socket-auth.middleware';
+import type { CompleteProfileCheck } from './services/profile.service';
 import type { MessageStore } from './services/message.service';
 import { denyRoomAccess, type RoomAuthorizer } from './services/room.service';
 import type { RealtimeServer } from './sockets/contracts';
@@ -10,6 +11,7 @@ interface AppOptions {
   origins: readonly string[];
   verifyToken: TokenVerifier;
   messages: MessageStore;
+  hasCompleteProfile: CompleteProfileCheck;
   authorizer?: RoomAuthorizer;
 }
 
@@ -30,7 +32,7 @@ export function createApp(options: AppOptions) {
   });
 
   const sessions = new Set<() => Promise<void>>();
-  io.use(socketAuth(options.verifyToken));
+  io.use(socketAuth(options.verifyToken, options.hasCompleteProfile));
   io.on('connection', socket => {
     const drain = registerRoomHandlers(io, socket, options.authorizer ?? denyRoomAccess, options.messages);
     sessions.add(drain);

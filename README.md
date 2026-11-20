@@ -1,38 +1,74 @@
 # Salón de Estudio Colaborativo · Servicio de tiempo real
 
-TS-02, base de Socket.IO para salas, presencia y chat. Requiere Node.js 20 o superior.
+TS-02 usa un servidor HTTP de Node.js con Socket.IO para salas, presencia y chat. Firebase Admin verifica la identidad y Firestore almacena los perfiles, las salas de US-06 y los mensajes. La API REST administra las salas. Realtime consulta esas salas y escribe únicamente en `realtime_messages`.
 
 ## Ejecución local
 
-1. Ejecuta `npm ci` y copia `.env.example` a `.env`.
-2. Configura `FIREBASE_PROJECT_ID` y las credenciales predeterminadas de aplicación (ADC) del mismo proyecto Firebase que usa el frontend. Si usas `GOOGLE_APPLICATION_CREDENTIALS`, apunta a un archivo fuera del repositorio.
-3. Ejecuta `npm run dev`. Para ejecutar la compilación, usa `npm run build` y `npm start`.
+Requiere Node.js 20 o superior. Ejecuta `npm ci`, copia `.env.example` a `.env` y configura el mismo proyecto Firebase que usan la API y el frontend. Firebase Admin utiliza Application Default Credentials (ADC). Si usas `GOOGLE_APPLICATION_CREDENTIALS`, indica la ruta de un archivo autorizado fuera del repositorio.
 
-`PORT` vale 3001 por defecto. `CORS_ORIGINS` acepta una lista de orígenes HTTP(S) exactos separados por comas y es obligatorio en producción. Las conexiones sin encabezado `Origin` también deben autenticarse. En desarrollo el origen predeterminado es `http://localhost:5173`.
+| Variable | Uso |
+| --- | --- |
+| `PORT` | Puerto HTTP y Socket.IO. Predeterminado `3001`. |
+| `NODE_ENV` | `production` exige orígenes explícitos. |
+| `CORS_ORIGINS` | Orígenes HTTP(S) exactos, separados por comas. En desarrollo se usa `http://localhost:5173` por defecto. |
+| `FIREBASE_PROJECT_ID` | ID obligatorio del proyecto. |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Ruta opcional a un archivo externo compatible con ADC. |
+| `HOST_PORT` | Puerto publicado por Compose en `127.0.0.1`. Predeterminado `3001`. |
 
-`GET /health` devuelve `200 {"status":"ok"}` cuando el proceso responde. Es una comprobación de disponibilidad HTTP. `npm run typecheck` comprueba el servicio y las pruebas. `npm test` ejecuta las pruebas locales con autenticación, autorización y persistencia simuladas.
+- `npm run dev` inicia el servicio en modo observación.
+- `npm run build && npm start` compila TypeScript y ejecuta `dist/server.js`.
+- `npm run typecheck` verifica el servicio y las pruebas. `npm test` usa sockets locales y dobles de Firebase.
+- `GET /health` devuelve HTTP 200 y `{"status":"ok"}`. Comprueba la respuesta HTTP del proceso. SIGTERM y SIGINT cierran Socket.IO y el servidor HTTP, esperan las operaciones en curso y liberan Firebase.
 
-## Contrato Socket.IO
+## Docker y Compose
 
-El cliente conecta con `auth: { token: firebaseIdToken }`. Firebase Admin verifica el token y comprueba su revocación al conectar. El UID se toma del token verificado. El rechazo se recibe como `connect_error` con `data.code = "UNAUTHENTICATED"`.
+```sh
+docker build -t salon-realtime:ts02 .
+docker compose config
+```
 
-| Evento | Dirección | Datos y resultado |
-| --- | --- | --- |
-| `room:join` | Cliente → servidor | `{roomId}`. Verifica acceso y confirma con `{roomId}`. |
-| `room:leave` | Cliente → servidor | `{roomId}`. La salida es idempotente y confirma con `{roomId}`. |
-| `chat:send` | Cliente → servidor | `{roomId, content}`. Exige pertenencia y autorización. Confirma con el mensaje guardado. |
-| `chat:message` | Servidor → sala | `{id, roomId, authorUid, content, createdAt}`. Incluye al emisor entre los destinatarios. |
-| `room:users` | Servidor → sala | `{roomId, users}`. Lista de UID únicos, sin perfiles ni datos de contacto. |
-| `room:error` | Servidor → cliente | `{code, message}` cuando falla una operación enviada sin callback. |
+El Dockerfile usa Node.js 22 y ejecuta JavaScript compilado con el usuario `node`. Compose levanta solamente realtime. Su dependencia externa es Firebase. La configuración de la API vive en su propio repositorio.
 
-Con callback, el servidor responde con `{ok: true, data}` o `{ok: false, error: {code, message}}`. `roomId` admite de 1 a 128 letras ASCII, números, guiones y guiones bajos. `content` debe tener entre 1 y 2000 unidades UTF-16 tras recortar espacios.
+Para Firebase desde Compose, proporciona ADC en tiempo de ejecución. Si tienes un archivo ADC autorizado, monta el archivo en solo lectura mediante un override local. Guarda el override fuera del repositorio y exporta `REALTIME_ADC_FILE` con la ruta absoluta al archivo. El usuario `node` del contenedor debe poder leerlo.
 
-La pertenencia es por conexión. Un usuario aparece una sola vez en presencia mientras tenga al menos una conexión unida. La reconexión requiere autenticarse y volver a entrar. La presencia usa el adaptador local de Socket.IO y cubre una sola instancia.
+```yaml
+services:
+  realtime:
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/firebase-adc.json
+    volumes:
+      - type: bind
+        source: ${REALTIME_ADC_FILE:?Indica la ruta al archivo ADC}
+        target: /run/secrets/firebase-adc.json
+        read_only: true
+```
 
-## Autorización y persistencia
+```sh
+docker compose -f docker-compose.yml -f /ruta/externa/compose.adc.yml up --build
+curl --fail http://127.0.0.1:3001/health
+```
 
-La copia local de `backend-api` aún no define la colección y el identificador de sala, el campo del UID del creador, la estructura de participantes ni las reglas de pertenencia. US-06 debe acordar ese contrato para conectar una implementación de `RoomAuthorizer.canAccess(roomId, uid)`. El proceso de producción usa la política de denegación por defecto. Las pruebas inyectan una política simulada en `createApp`. Un fallo del autorizador se devuelve como error seguro y evita la operación.
+## Preparación para Render
 
-El esquema provisional guarda cada mensaje en `realtime_messages/{id}`. El documento contiene `id` autogenerado, `roomId`, `authorUid` del token, `content` validado y `createdAt` como `Timestamp` generado por el servicio. El protocolo entrega la fecha en formato ISO 8601 UTC. Si Firestore rechaza la escritura, el servidor devuelve `PERSISTENCE_ERROR` y omite la publicación. US-06 debe confirmar el vínculo con la sala y la ubicación definitiva de los mensajes.
+Configura un Web Service con runtime Docker y health check `/health`. El proceso escucha en `0.0.0.0` y usa el `PORT` que Render proporciona. Configura `FIREBASE_PROJECT_ID` y `CORS_ORIGINS` con el origen HTTPS exacto del frontend en Vercel. El cliente Socket.IO apunta a la URL HTTPS del servicio para usar WSS. [Servicios web](https://render.com/docs/web-services) · [WebSockets](https://render.com/docs/websocket)
 
-La pertenencia de cada conexión se comprueba al enviar junto con el autorizador. La recepción depende de la pertenencia vigente en Socket.IO. La integración con US-06 debe definir cómo retirar de una sala a conexiones ya activas cuando cambien los permisos. La comprobación de revocación del token ocurre al conectar. `/health` no consulta Firebase.
+Según la estrategia ADC de TS-01, el administrador debe provisionar la identidad de ejecución. Si autoriza un archivo ADC, configúralo como Secret File de Render y apunta `GOOGLE_APPLICATION_CREDENTIALS` a `/etc/secrets/<archivo>`. La identidad necesita verificar el estado de las cuentas de Auth, leer salas y perfiles, consultar reservas de usuario y crear mensajes. La identidad concreta y sus permisos efectivos quedan pendientes de validación. [Archivos secretos en Render](https://render.com/docs/configure-environment-variables#secret-files)
+
+## Autenticación y eventos
+
+Conecta con `auth: { token: firebaseIdToken }`. Al conectar, entrar en una sala o enviar chat, el servicio verifica el token del proyecto con revocación, admite los proveedores de la API REST, rechaza otros tenants y comprueba el perfil completo de `users/{uid}` y la reserva de usuario. Un origen ausente también exige autenticación.
+
+- `room:join` recibe `{roomId}` y exige acceso vigente a la sala.
+- `room:leave` recibe `{roomId}` y es idempotente.
+- `room:users` entrega `{roomId, users}` a las conexiones de la sala cuando cambia la presencia.
+- `chat:send` recibe `{roomId, content}` y exige pertenencia por socket y acceso vigente.
+- `chat:message` entrega el mensaje persistido a la sala, incluido el emisor.
+- `room:error` entrega `{code, message}` cuando falla una operación sin callback.
+
+El [contrato realtime](docs/TS-02-contrato-realtime.md) detalla el formato, los acknowledgements y los errores. Los mensajes se guardan en `realtime_messages/{id}` con UID verificado y `Timestamp` generado por el servidor. El cliente recibe la fecha en UTC ISO 8601. Un fallo de escritura impide la emisión.
+
+## Limitaciones
+
+La presencia se mantiene en memoria en una sola instancia. Si se detecta pérdida de acceso en una entrada o envío, se retira ese socket de la sala. Un socket pasivo puede seguir recibiendo eventos hasta salir, desconectarse o provocar una revalidación. La revocación inmediata para todos los sockets exige una estrategia adicional. El cliente debe renovar el token y reconectar cuando expire, y volver a unirse tras reconectar. El protocolo carece de replay y deduplicación para reintentos.
+
+Consulta los [casos de prueba](docs/TS-02-casos-prueba.md) y el [informe QA](docs/TS-02-informe-QA.md) para conocer la cobertura local y la evidencia pendiente de producción.

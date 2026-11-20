@@ -1,0 +1,12 @@
+services:
+  realtime:
+    build:
+      context: .
+      target: production
+    init: true
+    ports:
+      - "127.0.0.1:${HOST_PORT:-3001}:${PORT:-3001}"
+    environment:
+      PORT: "${PORT:-3001}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:5173}"
+      FIREBASE_PROJECT_ID: "${FIREBASE_PROJECT_ID:-}"

@@ -3,6 +3,8 @@ import { createApp } from './app';
 import { readEnv } from './config/env';
 import { createFirebase } from './config/firebase';
 import { createMessageStore } from './services/message.service';
+import { createCompleteProfileCheck } from './services/profile.service';
+import { createRoomReader, FirestoreRoomAuthorizer } from './services/room.service';
 
 async function start() {
   const { port, origins, projectId } = readEnv();
@@ -10,6 +12,8 @@ async function start() {
   const app = createApp({
     origins,
     verifyToken: firebase.verifyToken,
+    authorizer: new FirestoreRoomAuthorizer(createRoomReader(firebase.firestore)),
+    hasCompleteProfile: createCompleteProfileCheck(firebase.firestore),
     messages: createMessageStore(firebase.firestore),
   });
 
@@ -22,7 +26,7 @@ async function start() {
   try {
     await new Promise<void>((resolve, reject) => {
       app.http.once('error', reject);
-      app.http.listen(port, () => {
+      app.http.listen(port, '0.0.0.0', () => {
         app.http.off('error', reject);
         resolve();
       });

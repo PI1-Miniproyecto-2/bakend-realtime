@@ -26,9 +26,9 @@ export interface RoomPayload { roomId: string }
 export interface Presence extends RoomPayload { users: string[] }
 
 export interface ClientEvents {
-  'room:join': (payload: unknown, ack: Reply<RoomPayload>) => void;
-  'room:leave': (payload: unknown, ack: Reply<RoomPayload>) => void;
-  'chat:send': (payload: unknown, ack: Reply<Message>) => void;
+  'room:join': (payload: unknown, ack?: Reply<RoomPayload>) => void;
+  'room:leave': (payload: unknown, ack?: Reply<RoomPayload>) => void;
+  'chat:send': (payload: unknown, ack?: Reply<Message>) => void;
 }
 
 export interface ServerEvents {
@@ -37,6 +37,6 @@ export interface ServerEvents {
   'room:error': (error: ErrorBody) => void;
 }
 
-interface Session { uid: string }
+interface Session { uid: string; revalidate: () => Promise<boolean> }
 export type RealtimeServer = Server<ClientEvents, ServerEvents, Record<never, never>, Session>;
 export type RealtimeSocket = Socket<ClientEvents, ServerEvents, Record<never, never>, Session>;

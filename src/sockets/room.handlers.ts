@@ -1,12 +1,12 @@
 import type { MessageStore } from '../services/message.service';
-import type { RoomAuthorizer } from '../services/room.service';
+import { isRoomId, type RoomAuthorizer } from '../services/room.service';
 import { RoomError, type RealtimeServer, type RealtimeSocket, type Reply } from './contracts';
 
 function roomIdFrom(payload: unknown): string {
   const roomId = payload && typeof payload === 'object' && 'roomId' in payload
     ? payload.roomId
     : undefined;
-  if (typeof roomId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(roomId) || roomId.trim() !== roomId) {
+  if (!isRoomId(roomId)) {
     throw new RoomError('INVALID_ROOM');
   }
   return roomId;
@@ -33,13 +33,23 @@ export function registerRoomHandlers(
     io.to(channel(roomId)).emit('room:users', { roomId, users: [...users] });
   }
 
+  async function leaveRoom(roomId: string) {
+    if (socket.rooms.has(channel(roomId))) {
+      await socket.leave(channel(roomId));
+      broadcastPresence(roomId);
+    }
+  }
+
   async function requireAccess(roomId: string) {
-    if (!(await authorizer.canAccess(roomId, uid))) {
+    const allowed = await socket.data.revalidate() &&
+      await authorizer.canAccess(roomId, uid).catch(() => false);
+    if (!allowed) {
+      await leaveRoom(roomId);
       throw new RoomError('FORBIDDEN');
     }
   }
 
-  function handle<T>(ack: Reply<T>, operation: () => Promise<T>) {
+  function handle<T>(ack: Reply<T> | undefined, operation: () => Promise<T>) {
     // Conserva el orden de las operaciones emitidas por este socket.
     pending = pending.then(async () => {
       if (!socket.connected) return;
@@ -70,10 +80,7 @@ export function registerRoomHandlers(
 
   socket.on('room:leave', (payload, ack) => handle(ack, async () => {
     const roomId = roomIdFrom(payload);
-    if (socket.rooms.has(channel(roomId))) {
-      await socket.leave(channel(roomId));
-      broadcastPresence(roomId);
-    }
+    await leaveRoom(roomId);
     return { roomId };
   }));
 
