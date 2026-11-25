@@ -55,20 +55,101 @@ async function setup(t: TestContext, useDefaultAuthorizer = false) {
     collection(path: string) {
       assert.ok(['usernames', 'realtime_messages'].includes(path));
       return {
-        where(field: string, operator: string, uid: string) {
-          assert.deepEqual([field, operator], ['uid', '==']);
-          return { uid };
-        },
-        doc() {
-          assert.equal(path, 'realtime_messages');
-          return {
-            id: randomUUID(),
-            async create(message: Record<string, unknown>) {
-              if (message.content === 'fallo') throw new Error('detalle privado');
-              saved.push(message);
-            },
-          };
-        },
+
+where(field: string, operator: string, uid: string) {
+  if (path === 'usernames') {
+    assert.deepEqual(
+      [field, operator],
+      ['uid', '==']
+    );
+
+    return { uid };
+  }
+
+  assert.deepEqual(
+    [field, operator],
+    ['roomId', '==']
+  );
+
+  let results = saved
+    .filter(message => message.roomId === uid)
+    .sort((a, b) => {
+      const dateA = a.createdAt as Timestamp;
+      const dateB = b.createdAt as Timestamp;
+
+      return (
+        dateB.seconds - dateA.seconds ||
+        dateB.nanoseconds - dateA.nanoseconds ||
+        String(b.id).localeCompare(String(a.id))
+      );
+    });
+
+  let maximum = results.length;
+
+  const query = {
+    orderBy() {
+      return query;
+    },
+
+    startAfter(cursor: { id: string }) {
+      const index = results.findIndex(
+        message => message.id === cursor.id
+      );
+
+      results = results.slice(index + 1);
+      return query;
+    },
+
+    limit(value: number) {
+      maximum = value;
+      return query;
+    },
+
+    async get() {
+      return {
+        docs: results.slice(0, maximum).map(message => ({
+          id: String(message.id),
+          data: () => message,
+        })),
+      };
+    },
+  };
+
+  return query;
+},
+
+
+doc(documentId?: string) {
+  assert.equal(path, 'realtime_messages');
+
+  const id = documentId ?? randomUUID();
+
+  return {
+    id,
+
+    async create(message: Record<string, unknown>) {
+      if (message.content === 'fallo') {
+        throw new Error('detalle privado');
+      }
+
+      saved.push(message);
+    },
+
+    async get() {
+      const message = saved.find(
+        item => item.id === id
+      );
+
+      return {
+        id,
+        exists: message !== undefined,
+        data: () => message,
+        get: (field: string) => message?.[field],
+      };
+    },
+  };
+},
+
       };
     },
     async runTransaction<T>(fn: (tx: {
@@ -342,4 +423,228 @@ test('persiste envíos simultáneos y limita la presencia a la sala', { timeout:
   assert.equal(new Set(received.map(message => message.id)).size, 2);
   await carol.timeout(1000).emitWithAck('room:leave', { roomId: roomB });
   assert.deepEqual(presence, []);
+});
+
+test('US-08: recupera historial ordenado y paginado', {
+  timeout: 5000,
+}, async t => {
+  const { connect, saved } = await setup(t);
+
+  const alice = await connect('alice');
+
+  for (let i = 1; i <= 120; i++) {
+    saved.push({
+      id: `mensaje-${i}`,
+      roomId: roomA,
+      authorUid: 'alice',
+      content: `Mensaje ${i}`,
+      createdAt: Timestamp.fromMillis(
+        1700000000000 + i * 1000
+      ),
+    });
+  }
+
+  assert.equal(
+    (await alice.timeout(1000).emitWithAck(
+      'room:join',
+      { roomId: roomA }
+    )).ok,
+    true
+  );
+
+  const first = await alice.timeout(1000).emitWithAck(
+    'chat:history',
+    { roomId: roomA }
+  );
+
+  assert.ok(first.ok);
+  assert.equal(first.data.messages.length, 50);
+  assert.equal(first.data.messages[0].content, 'Mensaje 71');
+  assert.equal(first.data.messages[49].content, 'Mensaje 120');
+  assert.equal(first.data.hasMore, true);
+  assert.equal(first.data.nextCursor, 'mensaje-71');
+
+  const second = await alice.timeout(1000).emitWithAck(
+    'chat:history',
+    {
+      roomId: roomA,
+      before: first.data.nextCursor,
+    }
+  );
+
+  assert.ok(second.ok);
+  assert.equal(second.data.messages.length, 50);
+  assert.equal(second.data.messages[0].content, 'Mensaje 21');
+  assert.equal(second.data.messages[49].content, 'Mensaje 70');
+  assert.equal(second.data.hasMore, true);
+
+  const third = await alice.timeout(1000).emitWithAck(
+    'chat:history',
+    {
+      roomId: roomA,
+      before: second.data.nextCursor,
+    }
+  );
+
+  assert.ok(third.ok);
+  assert.equal(third.data.messages.length, 20);
+  assert.equal(third.data.messages[0].content, 'Mensaje 1');
+  assert.equal(third.data.messages[19].content, 'Mensaje 20');
+  assert.equal(third.data.hasMore, false);
+  assert.equal(third.data.nextCursor, null);
+});
+
+test('US-08: devuelve historial vacío cuando no hay mensajes', {
+  timeout: 5000,
+}, async t => {
+  const { connect } = await setup(t);
+  const alice = await connect('alice');
+
+  await alice.timeout(1000).emitWithAck(
+    'room:join',
+    { roomId: roomA }
+  );
+
+  const result = await alice.timeout(1000).emitWithAck(
+    'chat:history',
+    { roomId: roomA }
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    data: {
+      roomId: roomA,
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+    },
+  });
+});
+
+test('US-08: aísla el historial entre salas', {
+  timeout: 5000,
+}, async t => {
+  const { connect, saved } = await setup(t);
+
+  const alice = await connect('alice');
+  const carol = await connect('carol');
+
+  saved.push({
+    id: 'mensaje-privado',
+    roomId: roomA,
+    authorUid: 'alice',
+    content: 'Mensaje privado de sala A',
+    createdAt: Timestamp.now(),
+  });
+
+  await alice.timeout(1000).emitWithAck(
+    'room:join',
+    { roomId: roomA }
+  );
+
+  await carol.timeout(1000).emitWithAck(
+    'room:join',
+    { roomId: roomB }
+  );
+
+  const denied = await carol.timeout(1000).emitWithAck(
+    'chat:history',
+    { roomId: roomA }
+  );
+
+  assert.equal(
+    denied.ok ? null : denied.error.code,
+    'NOT_JOINED'
+  );
+
+  const allowed = await carol.timeout(1000).emitWithAck(
+    'chat:history',
+    { roomId: roomB }
+  );
+
+  assert.ok(allowed.ok);
+  assert.deepEqual(allowed.data.messages, []);
+
+  const invalidCursor = await carol.timeout(1000).emitWithAck(
+    'chat:history',
+    {
+      roomId: roomB,
+      before: 'mensaje-privado',
+    }
+  );
+
+  assert.equal(
+    invalidCursor.ok ? null : invalidCursor.error.code,
+    'INVALID_HISTORY_CURSOR'
+  );
+});
+
+test('US-08: valida parámetros del historial', {
+  timeout: 5000,
+}, async t => {
+  const { connect } = await setup(t);
+  const alice = await connect('alice');
+
+  await alice.timeout(1000).emitWithAck(
+    'room:join',
+    { roomId: roomA }
+  );
+
+  for (const limit of [0, -1, 51, 1.5, '50', null]) {
+    const result = await alice.timeout(1000).emitWithAck(
+      'chat:history',
+      { roomId: roomA, limit }
+    );
+
+    assert.equal(
+      result.ok ? null : result.error.code,
+      'INVALID_HISTORY_LIMIT'
+    );
+  }
+
+  for (const before of ['', '../users/alice', 123, 'inexistente']) {
+    const result = await alice.timeout(1000).emitWithAck(
+      'chat:history',
+      { roomId: roomA, before }
+    );
+
+    assert.equal(
+      result.ok ? null : result.error.code,
+      'INVALID_HISTORY_CURSOR'
+    );
+  }
+});
+
+test('US-08: protege el historial al perder membresía', {
+  timeout: 5000,
+}, async t => {
+  const { connect, documents } = await setup(t);
+
+  const bob = await connect('bob');
+
+  assert.equal(
+    (await bob.timeout(1000).emitWithAck(
+      'room:join',
+      { roomId: roomA }
+    )).ok,
+    true
+  );
+
+  const path = `rooms/${roomA}`;
+  const room = documents.get(path)!;
+
+  documents.set(path, {
+    ...room,
+    participantUids: [],
+  });
+
+  const result = await bob.timeout(1000).emitWithAck(
+    'chat:history',
+    { roomId: roomA }
+  );
+
+  assert.equal(
+    result.ok ? null : result.error.code,
+    'FORBIDDEN'
+  );
 });
