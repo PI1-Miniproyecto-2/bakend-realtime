@@ -188,10 +188,43 @@ export function registerRoomHandlers(
         throw new RoomError('PERSISTENCE_ERROR');
       });
 
-      io.to(channel(roomId)).emit(
-        'chat:message',
-        message
-      );
+// Verificar los permisos de cada receptor antes
+// de entregar un mensaje en tiempo real.
+const recipients = [
+  ...(io.sockets.adapter.rooms.get(channel(roomId)) ?? []),
+];
+
+for (const socketId of recipients) {
+  const member = io.sockets.sockets.get(socketId);
+
+  if (!member || !member.connected) continue;
+
+  const allowed =
+    await member.data.revalidate().catch(() => false) &&
+    await authorizer.canAccess(
+      roomId,
+      member.data.uid
+    ).catch(() => false);
+
+  if (!allowed) {
+    member.emit('room:error', {
+      code: 'FORBIDDEN',
+      message: 'Acceso a la sala denegado',
+    });
+
+    await member.leave(channel(roomId));
+
+    broadcastPresence(roomId);
+    continue;
+  }
+
+  if (
+    member.connected &&
+    member.rooms.has(channel(roomId))
+  ) {
+    member.emit('chat:message', message);
+  }
+}
 
       return message;
     })

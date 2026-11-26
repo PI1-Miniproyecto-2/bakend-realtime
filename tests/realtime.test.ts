@@ -1146,3 +1146,61 @@ test('Realtime: deja de escuchar Firestore cuando la sala queda vacía', {
     false
   );
 });
+
+test('US-08: impide recibir mensajes con un token revocado', {
+  timeout: 5000,
+}, async t => {
+  const { connect, revoked } = await setup(t);
+
+  const alice = await connect('alice');
+  const bob = await connect('bob');
+
+  for (const socket of [alice, bob]) {
+    assert.ok(
+      (await socket.timeout(1000).emitWithAck(
+        'room:join',
+        { roomId: roomA }
+      )).ok
+    );
+  }
+
+  const received: Message[] = [];
+
+  bob.on('chat:message', message => {
+    received.push(message);
+  });
+
+  const denied = new Promise(resolve =>
+    bob.once('room:error', resolve)
+  );
+
+  // Revocar el token sin desconectar al usuario.
+  revoked.add('bob');
+
+  const result = await alice.timeout(1000).emitWithAck(
+    'chat:send',
+    {
+      roomId: roomA,
+      content: 'Mensaje protegido',
+    }
+  );
+
+  assert.ok(result.ok);
+
+  assert.deepEqual(await denied, {
+    code: 'FORBIDDEN',
+    message: 'Acceso a la sala denegado',
+  });
+
+  const history = await bob.timeout(1000).emitWithAck(
+    'chat:history',
+    { roomId: roomA }
+  );
+
+  assert.equal(
+    history.ok ? null : history.error.code,
+    'NOT_JOINED'
+  );
+
+  assert.deepEqual(received, []);
+});
