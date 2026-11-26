@@ -15,6 +15,7 @@ async function start() {
     authorizer: new FirestoreRoomAuthorizer(createRoomReader(firebase.firestore)),
     hasCompleteProfile: createCompleteProfileCheck(firebase.firestore),
     messages: createMessageStore(firebase.firestore),
+    firestore: firebase.firestore,
   });
 
   let shutdown: Promise<void> | undefined;

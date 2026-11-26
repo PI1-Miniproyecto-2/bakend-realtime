@@ -68,6 +68,17 @@ export interface ServerEvents {
   'chat:message': (message: Message) => void;
   'room:users': (presence: Presence) => void;
   'room:error': (error: ErrorBody) => void;
+
+  // US-10-06: Notificar edición de sala.
+  'room:updated': (payload: {
+    roomId: string;
+    name: string;
+  }) => void;
+
+  // US-11-06: Notificar eliminación de sala.
+  'room:deleted': (payload: {
+    roomId: string;
+  }) => void;
 }
 
 interface Session {

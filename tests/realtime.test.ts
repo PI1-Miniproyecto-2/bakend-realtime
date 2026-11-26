@@ -20,11 +20,34 @@ const malformedRoom = 'D'.repeat(20);
 const missingRoom = 'E'.repeat(20);
 const unavailableRoom = 'F'.repeat(20);
 
-async function setup(t: TestContext, useDefaultAuthorizer = false) {
+async function setup(
+  t: TestContext,
+  useDefaultAuthorizer = false,
+  enableRoomEvents = false,
+) {
   const documents = new Map<string, Record<string, unknown>>();
   const saved: Record<string, unknown>[] = [];
   const roomReads: string[] = [];
   const revoked = new Set(['revoked']);
+    type RoomSnapshot = {
+    exists: boolean;
+    data: () => Record<string, unknown> | undefined;
+  };
+
+  const listeners = new Map<
+    string,
+    (snapshot: RoomSnapshot) => void
+  >();
+
+  function publishRoom(roomId: string) {
+    const path = `rooms/${roomId}`;
+    const data = documents.get(path);
+
+    listeners.get(path)?.({
+      exists: data !== undefined,
+      data: () => data,
+    });
+  }
   for (const uid of ['alice', 'bob', 'carol', 'incomplete']) {
     documents.set(`users/${uid}`, {
       firstName: 'Nombre', lastName: 'Apellido', username: uid, usernameNormalized: uid,
@@ -45,10 +68,40 @@ async function setup(t: TestContext, useDefaultAuthorizer = false) {
     doc(path: string) {
       return {
         path,
+
         async get() {
-          if (path.startsWith('rooms/')) roomReads.push(path);
-          if (path === `rooms/${unavailableRoom}`) throw new Error('detalle privado');
-          return { data: () => documents.get(path) };
+          if (path.startsWith('rooms/')) {
+            roomReads.push(path);
+          }
+
+          if (path === `rooms/${unavailableRoom}`) {
+            throw new Error('detalle privado');
+          }
+
+          return {
+            data: () => documents.get(path),
+          };
+        },
+
+        onSnapshot(callback: (snapshot: RoomSnapshot) => void) {
+          listeners.set(path, callback);
+
+          queueMicrotask(() => {
+            if (listeners.get(path) !== callback) return;
+
+            const data = documents.get(path);
+
+            callback({
+              exists: data !== undefined,
+              data: () => data,
+            });
+          });
+
+          return () => {
+            if (listeners.get(path) === callback) {
+              listeners.delete(path);
+            }
+          };
         },
       };
     },
@@ -182,6 +235,7 @@ doc(documentId?: string) {
       };
     },
     messages: createMessageStore(db),
+    firestore: enableRoomEvents ? db : undefined,
   });
   const clients: Client[] = [];
   t.after(async () => {
@@ -212,8 +266,18 @@ doc(documentId?: string) {
     await connection(socket);
     return socket;
   }
-
-  return { url, client, connect, saved, documents, roomReads, revoked };
+  return {
+    url,
+    client,
+    connect,
+    saved,
+    documents,
+    roomReads,
+    revoked,
+    publishRoom,
+    listeners,
+  };
+  
 }
 
 function connection(client: Client) {
@@ -819,5 +883,266 @@ test('US-08: impide reingreso si se pierde la membresía', {
   assert.equal(
     history.ok ? null : history.error.code,
     'NOT_JOINED'
+  );
+});
+
+// US-10-06: Notificaciones de edición.
+test('US-10: notifica la edición únicamente a los participantes de la sala', {
+  timeout: 5000,
+}, async t => {
+  const { connect, documents, publishRoom } =
+    await setup(t, false, true);
+
+  const alice = await connect('alice');
+  const bob = await connect('bob');
+  const carol = await connect('carol');
+
+  for (const [socket, roomId] of [
+    [alice, roomA],
+    [bob, roomA],
+    [carol, roomB],
+  ] as const) {
+    assert.ok(
+      (await socket.timeout(1000).emitWithAck(
+        'room:join',
+        { roomId }
+      )).ok
+    );
+  }
+
+  const outside: unknown[] = [];
+
+  carol.on('room:updated', event => {
+    outside.push(event);
+  });
+
+  const ownerUpdate = new Promise(resolve =>
+    alice.once('room:updated', resolve)
+  );
+
+  const participantUpdate = new Promise(resolve =>
+    bob.once('room:updated', resolve)
+  );
+
+  const path = `rooms/${roomA}`;
+
+  documents.set(path, {
+    ...documents.get(path)!,
+    name: 'Matemáticas avanzadas',
+  });
+
+  publishRoom(roomA);
+
+  const expected = {
+    roomId: roomA,
+    name: 'Matemáticas avanzadas',
+  };
+
+  assert.deepEqual(await ownerUpdate, expected);
+  assert.deepEqual(await participantUpdate, expected);
+
+  await carol.timeout(1000).emitWithAck(
+    'room:join',
+    { roomId: roomB }
+  );
+
+  assert.deepEqual(outside, []);
+});
+
+
+// US-11-06: Notificaciones de eliminación.
+test('US-11: notifica la eliminación y expulsa a los participantes', {
+  timeout: 5000,
+}, async t => {
+  const { connect, documents, publishRoom, listeners } =
+    await setup(t, false, true);
+
+  const alice = await connect('alice');
+  const bob = await connect('bob');
+  const carol = await connect('carol');
+
+  for (const [socket, roomId] of [
+    [alice, roomA],
+    [bob, roomA],
+    [carol, roomB],
+  ] as const) {
+    assert.ok(
+      (await socket.timeout(1000).emitWithAck(
+        'room:join',
+        { roomId }
+      )).ok
+    );
+  }
+
+  const outside: unknown[] = [];
+
+  carol.on('room:deleted', event => {
+    outside.push(event);
+  });
+
+  const ownerDeleted = new Promise(resolve =>
+    alice.once('room:deleted', resolve)
+  );
+
+  const participantDeleted = new Promise(resolve =>
+    bob.once('room:deleted', resolve)
+  );
+
+  documents.delete(`rooms/${roomA}`);
+  publishRoom(roomA);
+
+  assert.deepEqual(await ownerDeleted, {
+    roomId: roomA,
+  });
+
+  assert.deepEqual(await participantDeleted, {
+    roomId: roomA,
+  });
+
+  const send = await bob.timeout(1000).emitWithAck(
+    'chat:send',
+    {
+      roomId: roomA,
+      content: 'Mensaje después de eliminar',
+    }
+  );
+
+  assert.equal(
+    send.ok ? null : send.error.code,
+    'NOT_JOINED'
+  );
+
+  const history = await bob.timeout(1000).emitWithAck(
+    'chat:history',
+    { roomId: roomA }
+  );
+
+  assert.equal(
+    history.ok ? null : history.error.code,
+    'NOT_JOINED'
+  );
+
+  const rejoin = await bob.timeout(1000).emitWithAck(
+    'room:join',
+    { roomId: roomA }
+  );
+
+  assert.equal(
+    rejoin.ok ? null : rejoin.error.code,
+    'FORBIDDEN'
+  );
+
+  const otherRoom = await carol.timeout(1000).emitWithAck(
+    'chat:send',
+    {
+      roomId: roomB,
+      content: 'Mi sala sigue funcionando',
+    }
+  );
+
+  assert.ok(otherRoom.ok);
+  assert.deepEqual(outside, []);
+  assert.equal(listeners.has(`rooms/${roomA}`), false);
+});
+
+
+// Seguridad: pérdida de membresía.
+test('Realtime: retira al participante cuando pierde acceso a la sala', {
+  timeout: 5000,
+}, async t => {
+  const { connect, documents, publishRoom } =
+    await setup(t, false, true);
+
+  const alice = await connect('alice');
+  const bob = await connect('bob');
+
+  for (const socket of [alice, bob]) {
+    assert.ok(
+      (await socket.timeout(1000).emitWithAck(
+        'room:join',
+        { roomId: roomA }
+      )).ok
+    );
+  }
+
+  const denied = new Promise(resolve =>
+    bob.once('room:error', resolve)
+  );
+
+  const path = `rooms/${roomA}`;
+
+  documents.set(path, {
+    ...documents.get(path)!,
+    participantUids: [],
+  });
+
+  publishRoom(roomA);
+
+  assert.deepEqual(await denied, {
+    code: 'FORBIDDEN',
+    message: 'Acceso a la sala denegado',
+  });
+
+  const received: Message[] = [];
+
+  bob.on('chat:message', message => {
+    received.push(message);
+  });
+
+  const sent = await alice.timeout(1000).emitWithAck(
+    'chat:send',
+    {
+      roomId: roomA,
+      content: 'Mensaje privado',
+    }
+  );
+
+  assert.ok(sent.ok);
+
+  const history = await bob.timeout(1000).emitWithAck(
+    'chat:history',
+    { roomId: roomA }
+  );
+
+  assert.equal(
+    history.ok ? null : history.error.code,
+    'NOT_JOINED'
+  );
+
+  assert.deepEqual(received, []);
+});
+
+
+// Liberación de recursos.
+test('Realtime: deja de escuchar Firestore cuando la sala queda vacía', {
+  timeout: 5000,
+}, async t => {
+  const { connect, listeners } =
+    await setup(t, false, true);
+
+  const alice = await connect('alice');
+
+  assert.ok(
+    (await alice.timeout(1000).emitWithAck(
+      'room:join',
+      { roomId: roomA }
+    )).ok
+  );
+
+  assert.equal(
+    listeners.has(`rooms/${roomA}`),
+    true
+  );
+
+  assert.ok(
+    (await alice.timeout(1000).emitWithAck(
+      'room:leave',
+      { roomId: roomA }
+    )).ok
+  );
+
+  assert.equal(
+    listeners.has(`rooms/${roomA}`),
+    false
   );
 });

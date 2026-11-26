@@ -6,6 +6,8 @@ import type { MessageStore } from './services/message.service';
 import { denyRoomAccess, type RoomAuthorizer } from './services/room.service';
 import type { RealtimeServer } from './sockets/contracts';
 import { registerRoomHandlers } from './sockets/room.handlers';
+import type { Firestore } from 'firebase-admin/firestore';
+import { registerRoomEvents } from './services/room-events.service';
 
 interface AppOptions {
   origins: readonly string[];
@@ -13,6 +15,7 @@ interface AppOptions {
   messages: MessageStore;
   hasCompleteProfile: CompleteProfileCheck;
   authorizer?: RoomAuthorizer;
+  firestore?: Firestore;
 }
 
 export function createApp(options: AppOptions) {
@@ -30,7 +33,9 @@ export function createApp(options: AppOptions) {
     },
     maxHttpBufferSize: 32 * 1024,
   });
-
+  const closeRoomEvents = options.firestore
+  ? registerRoomEvents(io, options.firestore)
+  : () => {};
   const sessions = new Set<() => Promise<void>>();
   io.use(socketAuth(options.verifyToken, options.hasCompleteProfile));
   io.on('connection', socket => {
@@ -44,6 +49,7 @@ export function createApp(options: AppOptions) {
   return {
     http,
     async close() {
+      closeRoomEvents();
       await io.close();
       await Promise.all([...sessions].map(drain => drain()));
     },
