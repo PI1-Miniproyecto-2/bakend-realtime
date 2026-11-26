@@ -648,3 +648,176 @@ test('US-08: protege el historial al perder membresía', {
     'FORBIDDEN'
   );
 });
+
+test('US-08: permite reconectar y recuperar mensajes perdidos', {
+  timeout: 5000,
+}, async t => {
+  const { connect } = await setup(t);
+
+  const alice = await connect('alice');
+  const bob = await connect('bob');
+
+  assert.equal(
+    (await alice.timeout(1000).emitWithAck(
+      'room:join',
+      { roomId: roomA }
+    )).ok,
+    true
+  );
+
+  assert.equal(
+    (await bob.timeout(1000).emitWithAck(
+      'room:join',
+      { roomId: roomA }
+    )).ok,
+    true
+  );
+
+  // Bob pierde la conexión.
+  const departure = nextPresence(alice);
+  bob.disconnect();
+
+  assert.deepEqual(await departure, {
+    roomId: roomA,
+    users: ['alice'],
+  });
+
+  // Alice envía un mensaje mientras Bob está desconectado.
+  const sent = await alice.timeout(1000).emitWithAck(
+    'chat:send',
+    {
+      roomId: roomA,
+      content: 'Mensaje durante la desconexión',
+    }
+  );
+
+  assert.ok(sent.ok);
+
+  // Bob establece nuevamente la conexión.
+  await connection(bob);
+
+  const arrival = nextPresence(alice);
+
+  const joined = await bob.timeout(1000).emitWithAck(
+    'room:join',
+    { roomId: roomA }
+  );
+
+  assert.ok(joined.ok);
+
+  assert.deepEqual(await arrival, {
+    roomId: roomA,
+    users: ['alice', 'bob'],
+  });
+
+  // Recuperar mensajes enviados durante la desconexión.
+  const history = await bob.timeout(1000).emitWithAck(
+    'chat:history',
+    { roomId: roomA }
+  );
+
+  assert.ok(history.ok);
+  assert.equal(history.data.messages.length, 1);
+
+  assert.equal(
+    history.data.messages[0].content,
+    'Mensaje durante la desconexión'
+  );
+
+  // Comprobar que recibe mensajes en tiempo real nuevamente.
+  const delivered = new Promise<Message>(resolve =>
+    bob.once('chat:message', resolve)
+  );
+
+  const newMessage = await alice.timeout(1000).emitWithAck(
+    'chat:send',
+    {
+      roomId: roomA,
+      content: 'Bienvenido nuevamente',
+    }
+  );
+
+  assert.ok(newMessage.ok);
+
+  assert.equal(
+    (await delivered).content,
+    'Bienvenido nuevamente'
+  );
+});
+
+test('US-08: rechaza reconexión con token revocado', {
+  timeout: 5000,
+}, async t => {
+  const { connect, revoked } = await setup(t);
+
+  const bob = await connect('bob');
+
+  const joined = await bob.timeout(1000).emitWithAck(
+    'room:join',
+    { roomId: roomA }
+  );
+
+  assert.ok(joined.ok);
+
+  bob.disconnect();
+
+  // Simular revocación del token.
+  revoked.add('bob');
+
+  await assert.rejects(connection(bob), {
+    message: 'Autenticación requerida',
+    data: {
+      code: 'UNAUTHENTICATED',
+    },
+  });
+
+  assert.equal(bob.connected, false);
+});
+
+test('US-08: impide reingreso si se pierde la membresía', {
+  timeout: 5000,
+}, async t => {
+  const { connect, documents } = await setup(t);
+
+  const bob = await connect('bob');
+
+  assert.ok(
+    (await bob.timeout(1000).emitWithAck(
+      'room:join',
+      { roomId: roomA }
+    )).ok
+  );
+
+  bob.disconnect();
+
+  const path = `rooms/${roomA}`;
+  const room = documents.get(path)!;
+
+  // Retirar la autorización de Bob.
+  documents.set(path, {
+    ...room,
+    participantUids: [],
+  });
+
+  await connection(bob);
+
+  const result = await bob.timeout(1000).emitWithAck(
+    'room:join',
+    { roomId: roomA }
+  );
+
+  assert.equal(
+    result.ok ? null : result.error.code,
+    'FORBIDDEN'
+  );
+
+  const history = await bob.timeout(1000).emitWithAck(
+    'chat:history',
+    { roomId: roomA }
+  );
+
+  assert.equal(
+    history.ok ? null : history.error.code,
+    'NOT_JOINED'
+  );
+});
