@@ -63,6 +63,7 @@ Conecta con `auth: { token: firebaseIdToken }`. Al conectar, entrar en una sala 
 - `room:users` entrega `{roomId, users}` a las conexiones de la sala cuando cambia la presencia.
 - `chat:send` recibe `{roomId, content}` y exige pertenencia por socket y acceso vigente.
 - `chat:message` entrega el mensaje persistido a la sala, incluido el emisor.
+- `chat:history` recibe `{roomId, limit?, before?}` y devuelve el historial paginado mediante acknowledgement únicamente al solicitante.
 - `room:error` entrega `{code, message}` cuando falla una operación sin callback.
 
 El [contrato realtime](docs/TS-02-contrato-realtime.md) detalla el formato, los acknowledgements y los errores. Los mensajes se guardan en `realtime_messages/{id}` con UID verificado y `Timestamp` generado por el servidor. El cliente recibe la fecha en UTC ISO 8601. Un fallo de escritura impide la emisión.
@@ -72,3 +73,46 @@ El [contrato realtime](docs/TS-02-contrato-realtime.md) detalla el formato, los 
 La presencia se mantiene en memoria en una sola instancia. Si se detecta pérdida de acceso en una entrada o envío, se retira ese socket de la sala. Un socket pasivo puede seguir recibiendo eventos hasta salir, desconectarse o provocar una revalidación. La revocación inmediata para todos los sockets exige una estrategia adicional. El cliente debe renovar el token y reconectar cuando expire, y volver a unirse tras reconectar. El protocolo carece de replay y deduplicación para reintentos.
 
 Consulta los [casos de prueba](docs/TS-02-casos-prueba.md) y el [informe QA](docs/TS-02-informe-QA.md) para conocer la cobertura local y la evidencia pendiente de producción.
+
+## US-08 · Historial y reconexión
+
+El servicio permite consultar los últimos 50 mensajes
+de una sala mediante `chat:history`.
+
+La paginación utiliza un cursor basado en el ID
+del mensaje más antiguo de la página.
+
+El cliente debe autenticarse nuevamente y ejecutar
+`room:join` después de una desconexión. Posteriormente
+puede recuperar los mensajes mediante `chat:history`.
+
+### Índice de Firestore
+
+La consulta del historial utiliza la colección
+`realtime_messages` y requiere un índice compuesto
+con los siguientes campos:
+
+| Campo | Orden |
+| --- | --- |
+| roomId | Ascendente |
+| createdAt | Descendente |
+| __name__ | Descendente |
+
+El alcance de consulta es Collection.
+
+La identidad de ejecución de Firebase Admin debe
+tener permisos de lectura y consulta de mensajes,
+además de los permisos de escritura existentes.
+
+### Verificación local
+
+```sh
+npm run typecheck
+npm test
+npm run build
+```
+
+Resultado: 17 pruebas aprobadas y ninguna fallida.
+
+Pendiente: verificar el índice, los permisos efectivos
+de Firebase y la integración en producción.

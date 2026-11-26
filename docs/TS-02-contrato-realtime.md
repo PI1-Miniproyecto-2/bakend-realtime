@@ -39,3 +39,137 @@ La salida es idempotente. La presencia expone UID únicos a miembros de la sala.
 Cada envío válido crea `realtime_messages/{id}` con `id`, `roomId`, `authorUid`, `content` y `createdAt` como Timestamp. El servidor genera el ID y la fecha y descarta un UID o fecha suministrados por el cliente. La emisión sigue a la escritura confirmada. Si el emisor se desconecta mientras se guarda el mensaje, una escritura exitosa aún se publica a los miembros presentes. El emisor desconectado pierde el acknowledgement. Los envíos por socket se procesan en orden. Entre sockets, las escrituras pueden completarse en distinto orden.
 
 Entrar y enviar vuelven a verificar identidad, perfil y sala. Al detectar una denegación, el servidor retira de esa sala el socket solicitante y actualiza presencia. Un cambio posterior a la comprobación puede coincidir con la escritura. Los sockets pasivos conservan su suscripción hasta una salida, desconexión o denegación en una nueva operación. El retiro inmediato requiere un mecanismo adicional.
+
+## US-08 · Historial de mensajes paginado
+
+El evento `chat:history` permite recuperar los mensajes
+persistidos en Firestore correspondientes a una sala.
+
+### Solicitud
+
+Dirección: cliente → servidor.
+
+Evento: `chat:history`.
+
+Carga JSON:
+
+```json
+{
+  "roomId": "Abcdefghij0123456789",
+  "limit": 50
+}
+```
+
+El límite es opcional. Su valor predeterminado es 50
+y debe ser un número entero entre 1 y 50.
+
+Para consultar mensajes anteriores se utiliza el cursor:
+
+```json
+{
+  "roomId": "Abcdefghij0123456789",
+  "limit": 50,
+  "before": "idMensajeAnterior"
+}
+```
+
+### Respuesta exitosa
+
+La respuesta se entrega únicamente al socket solicitante
+mediante acknowledgement.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "roomId": "Abcdefghij0123456789",
+    "messages": [
+      {
+        "id": "idMensaje",
+        "roomId": "Abcdefghij0123456789",
+        "authorUid": "uidA",
+        "content": "Hola",
+        "createdAt": "2026-11-25T15:00:00.000Z"
+      }
+    ],
+    "hasMore": false,
+    "nextCursor": null
+  }
+}
+```
+
+Los mensajes se entregan en orden cronológico ascendente.
+La consulta utiliza la fecha y el ID del documento para
+mantener un orden estable.
+
+Si existen mensajes anteriores, `hasMore` será verdadero
+y `nextCursor` contendrá el ID del mensaje más antiguo
+de la página recuperada.
+
+### Seguridad del historial
+
+- El usuario debe estar autenticado.
+- Debe tener un perfil completo.
+- Debe pertenecer a la sala mediante `room:join`.
+- Se comprueba nuevamente el acceso a la sala.
+- El cursor debe pertenecer a la misma sala.
+- El historial no se transmite a otros participantes.
+- Se revalidan los permisos antes de entregar los datos.
+
+### Errores adicionales
+
+| Código | Condición |
+| --- | --- |
+| INVALID_HISTORY_LIMIT | Límite inválido. |
+| INVALID_HISTORY_CURSOR | Cursor inválido, inexistente o de otra sala. |
+| HISTORY_ERROR | Fallo al consultar el historial. |
+| NOT_JOINED | El socket no pertenece a la sala. |
+| FORBIDDEN | El usuario perdió la autorización. |
+
+## US-08 · Reconexión y recuperación de mensajes
+
+Cuando se pierde la conexión, el servidor actualiza
+la presencia de los participantes.
+
+El cliente debe:
+
+1. Obtener un token Firebase válido.
+2. Restablecer la conexión con Socket.IO.
+3. Ejecutar nuevamente `room:join`.
+4. Esperar la confirmación exitosa.
+5. Solicitar `chat:history`.
+6. Recuperar páginas anteriores si es necesario.
+7. Unificar historial y eventos `chat:message` por ID
+   para evitar duplicados.
+
+El servidor verifica nuevamente la identidad,
+el perfil y la autorización de acceso.
+
+Si el token fue revocado o el usuario perdió su
+membresía, se rechaza la reconexión o el reingreso.
+
+La reconexión automática debe ser integrada por el
+Frontend. El servidor admite el reingreso autenticado
+y la recuperación paginada del historial.
+
+## US-08 · Verificación técnica
+
+Pruebas locales ejecutadas:
+
+- Recuperación de historial ordenado y paginado.
+- Historial vacío.
+- Aislamiento del historial entre salas.
+- Validación de límites y cursores.
+- Protección ante pérdida de membresía.
+- Reconexión y recuperación de mensajes perdidos.
+- Rechazo de reconexión con token revocado.
+- Rechazo de reingreso sin autorización.
+
+Resultado acumulado: 17 pruebas aprobadas, 0 fallidas.
+
+La verificación de TypeScript y la compilación
+finalizaron correctamente.
+
+Las pruebas utilizan sockets locales y dobles de Firebase.
+Queda pendiente la validación con Firestore real y la
+integración en producción.
