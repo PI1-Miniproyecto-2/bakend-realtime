@@ -173,3 +173,74 @@ finalizaron correctamente.
 Las pruebas utilizan sockets locales y dobles de Firebase.
 Queda pendiente la validación con Firestore real y la
 integración en producción.
+
+## Sprint 3 — Notificaciones de edición y eliminación de salas
+
+### US-10-06: Actualización de salas
+
+Evento: `room:updated`
+
+Dirección: servidor → cliente.
+
+Destinatarios: usuarios conectados a la sala correspondiente.
+
+Payload:
+
+```json
+{
+  "roomId": "ID_DE_LA_SALA",
+  "name": "Nuevo nombre de la sala"
+}
+```
+
+El Backend Realtime escucha los cambios del documento de
+la sala en Firestore y notifica su nombre actualizado.
+El evento también puede emitirse al iniciar la observación.
+
+### US-11-06: Eliminación de salas
+
+Evento: `room:deleted`
+
+Dirección: servidor → cliente.
+
+Destinatarios: usuarios conectados a la sala eliminada.
+
+Payload:
+
+```json
+{
+  "roomId": "ID_DE_LA_SALA"
+}
+```
+
+Cuando el documento de la sala es eliminado o deja de
+estar activo, el servidor notifica a los participantes
+y retira sus conexiones del canal correspondiente.
+
+Los usuarios no pueden volver a ingresar, enviar mensajes
+ni consultar el historial de una sala eliminada.
+
+### Seguridad y aislamiento
+
+- Las notificaciones se limitan al canal de la sala.
+- Los permisos de edición y eliminación se validan
+  desde el Backend API.
+- Los cambios de membresía observados en Firestore
+  permiten retirar participantes no autorizados.
+- Las suscripciones de Firestore se liberan cuando
+  la sala queda vacía.
+- El Frontend no accede directamente a Firestore.
+
+### Evidencias técnicas
+
+- 21 pruebas automatizadas aprobadas en Backend Realtime.
+- 0 pruebas fallidas.
+- Verificación de TypeScript exitosa.
+- Compilación exitosa.
+
+### Validaciones pendientes
+
+- Integración con Firestore real.
+- Recepción de eventos desde el Frontend publicado.
+- Revalidación de permisos de receptores pasivos.
+- Verificación del despliegue en Render.
